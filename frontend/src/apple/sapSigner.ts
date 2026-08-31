@@ -1,9 +1,9 @@
 // 浏览器端 SAP 签名适配层
-// 签名引擎（sap-signer.js + sap.wasm）作为静态资源放在 /sap/ 下，
-// 运行时动态加载；跨域的 Apple SAP setup 请求复用 libcurl（绕过 CORS），
-// 因此无需后端代理。
-// 注意：libcurl 相关依赖延迟到真正发请求时才动态加载，
-// 避免在 node/测试环境引入 wasm 包。
+// 签名引擎（sap-signer.js + sap.wasm）作为静态资源放在 /sap/ 下，运行时动态加载。
+// Apple SAP setup 请求（setupCert.plist / signSapSetup/legacy）要求 TLS 1.3，
+// 浏览器侧 wasm TLS（node-forge）不支持（curl 错误码 35），因此统一走
+// backend 的 /api/sap 代理（Node 原生 HTTPS），由代理转发到 Apple。
+// 注意：依赖延迟加载，避免 node/测试环境引入额外模块。
 
 const SAP_BASE = "/sap/";
 const SIGNER_SCRIPT = `${SAP_BASE}sap-signer.js`;
@@ -32,35 +32,16 @@ function loadSignerScript(): Promise<void> {
   return scriptLoading;
 }
 
-/** libcurl fetch 适配：输出 sap-signer 需要的 fetch-like Response。 */
-async function libcurlFetch(url: string, init?: RequestInit): Promise<ResponseLike> {
-  const { libcurl, initLibcurl } = await import("./libcurl-init");
-  await initLibcurl();
-  const resp = await (libcurl as any).fetch(url, init);
-  const rawHeaders: [string, string][] = resp.raw_headers ?? [];
-  const contentType =
-    rawHeaders.find(([k]) => k.toLowerCase() === "content-type")?.[1] ?? "";
-  let bytes: Uint8Array | null = null;
-  const readBytes = async (): Promise<Uint8Array> => {
-    if (bytes) return bytes;
-    if (typeof resp.arrayBuffer === "function") {
-      bytes = new Uint8Array(await resp.arrayBuffer());
-    } else {
-      bytes = new TextEncoder().encode(await resp.text());
-    }
-    return bytes;
-  };
-  return {
-    ok: resp.status >= 200 && resp.status < 300,
-    status: resp.status,
-    arrayBuffer: async () => (await readBytes()).slice().buffer,
-  };
-}
-
-interface ResponseLike {
-  ok: boolean;
-  status: number;
-  arrayBuffer(): Promise<ArrayBuffer>;
+/** 通过 backend /api/sap 代理转发 Apple SAP setup 请求。 */
+async function proxiedFetch(url: string, init?: RequestInit): Promise<Response> {
+  const { authHeaders } = await import("../api/client");
+  const proxied = `/api/sap?url=${encodeURIComponent(url)}`;
+  return fetch(proxied, {
+    method: init?.method ?? "GET",
+    headers: { ...(init?.headers as Record<string, string> | undefined), ...authHeaders() },
+    body: init?.body,
+    cache: "no-store",
+  });
 }
 
 /**
@@ -79,6 +60,6 @@ export async function signSap(xml: string): Promise<string> {
     });
     engineReady = true;
   }
-  // directFetch: 直接请求 Apple SAP 端点，由 libcurl 绕过 CORS，无需代理
-  return w.sapSign(xml, { fetchImpl: libcurlFetch, directFetch: true });
+  // directFetch: fetchImpl 收到 Apple 原始 URL，由 proxiedFetch 转发到 backend 代理
+  return w.sapSign(xml, { fetchImpl: proxiedFetch, directFetch: true });
 }
