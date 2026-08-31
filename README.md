@@ -12,6 +12,58 @@ AssppWeb uses a zero-trust design where the server **never sees your Apple crede
 
 **恳请所有转发项目的博主对自己的受众进行网络安全技术科普。要有哪个不拎清的大头儿子搞出事情来都够我们喝一壶的。**
 
+## Apple ID Login: SAP Request Signing
+
+Apple now requires every authentication request to carry an SAP signature in the `X-Apple-ActionSignature` header; unsigned login requests are rejected. AssppWeb signs the exact plist body that is sent to Apple:
+
+1. The login body is built as a plist XML string (`frontend/src/apple/plist.ts`).
+2. `frontend/src/apple/sapSigner.ts` loads the browser-side signing engine from `/sap/` (`frontend/public/sap/`: `sap-signer.js` + `sap.wasm` + `unicorn_x86.js` + `wasm_exec.js`). The engine runs a WASM build of Apple's signing stack in the page.
+3. The engine needs two Apple endpoints during setup:
+   - `GET https://s.mzstatic.com/sap/setupCert.plist`
+   - `POST https://fpinit.itunes.apple.com/v1/signSapSetup/legacy`
+4. The resulting Base64 signature is attached to the login request as `X-Apple-ActionSignature` (`frontend/src/apple/authenticate.ts`).
+
+### Why the setup endpoints go through the backend
+
+`fpinit.itunes.apple.com` (like `init.itunes.apple.com`) **requires TLS 1.3**, but the browser-side WASM TLS stack used for the zero-trust direct connection does not support it — requests fail with `curl error 35: SSL connect error`. These two setup requests are therefore proxied through the backend:
+
+- `backend/src/routes/sap.ts` exposes `GET/POST /api/sap?url=...` with a strict allow-list (only the two endpoints above), forwards them via Node's native HTTPS (TLS 1.3 capable), and enforces size/time limits.
+- Only these public, credential-free setup requests are proxied. The login request itself — containing your credentials — is still sent directly from the browser to Apple over the Wisp tunnel; the server cannot read it.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `error code 35: SSL connect error` during login | SAP setup request bypassing the backend proxy | Update to a build containing `backend/src/routes/sap.ts` and rebuild both frontend and backend |
+| Signature page hangs or `/sap/*` 404 | Static signing assets missing from the deployment | Ensure `frontend/public/sap/` is included in your build output (Vite copies it into `dist/`) |
+| `401` on `/api/sap` | Access password enabled and token missing | Log in through the web UI so the `X-Access-Token` header is set |
+
+## Apple ID 登录：SAP 请求签名（中文说明）
+
+Apple 现在要求所有认证请求必须携带 SAP 签名（请求头 `X-Apple-ActionSignature`），未签名的登录请求会被拒绝。AssppWeb 对实际提交给 Apple 的 plist 请求体进行签名：
+
+1. 登录请求体以 plist XML 字符串构建（`frontend/src/apple/plist.ts`）。
+2. `frontend/src/apple/sapSigner.ts` 运行时从 `/sap/` 动态加载浏览器端签名引擎（`frontend/public/sap/`：`sap-signer.js` + `sap.wasm` + `unicorn_x86.js` + `wasm_exec.js`），在页面内以 WASM 运行 Apple 的签名栈。
+3. 签名引擎初始化需要访问两个 Apple 端点：
+   - `GET https://s.mzstatic.com/sap/setupCert.plist`
+   - `POST https://fpinit.itunes.apple.com/v1/signSapSetup/legacy`
+4. 得到的 Base64 签名以 `X-Apple-ActionSignature` 请求头附在登录请求上（`frontend/src/apple/authenticate.ts`）。
+
+### 为什么 setup 请求要经后端代理
+
+`fpinit.itunes.apple.com`（与 `init.itunes.apple.com` 同族）**要求 TLS 1.3**，而零信任直连所用的浏览器侧 WASM TLS 栈不支持 TLS 1.3 —— 直连会报 `curl error 35: SSL connect error`。因此这两个 setup 请求经后端代理：
+
+- `backend/src/routes/sap.ts` 暴露 `GET/POST /api/sap?url=...`，带严格白名单（仅放行上述两个端点），用 Node 原生 HTTPS（支持 TLS 1.3）转发，并限制大小与耗时。
+- 仅代理这两个不含凭据的公开 setup 请求；**包含账号密码的登录请求本身仍然由浏览器经 Wisp 隧道直连 Apple，服务端无法读取**。
+
+### 常见问题排查
+
+| 症状 | 原因 | 处理 |
+| --- | --- | --- |
+| 登录时报 `error code 35: SSL connect error` | SAP setup 请求绕过了后端代理 | 更新到包含 `backend/src/routes/sap.ts` 的版本，前端后端都要重新构建 |
+| 签名页卡住或 `/sap/*` 404 | 部署缺少静态签名资源 | 确认 `frontend/public/sap/` 已包含在构建产物中（Vite 会拷入 `dist/`） |
+| `/api/sap` 返回 `401` | 开启了访问密码且未携带令牌 | 先在网页 UI 完成密码验证（自动附带 `X-Access-Token` 头） |
+
 ## Quick Start
 
 ### Deploy to Cloudflare
