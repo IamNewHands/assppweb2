@@ -3,6 +3,7 @@ import { appleRequest } from "./request";
 import { buildPlist, parsePlist } from "./plist";
 import { extractAndMergeCookies } from "./cookies";
 import { fetchBag, defaultAuthURL } from "./bag";
+import { signSap } from "./sapSigner";
 import i18n from "../i18n";
 
 export class AuthenticationError extends Error {
@@ -21,6 +22,7 @@ export async function authenticate(
   code?: string,
   existingCookies?: Cookie[],
   deviceId: string = "",
+  signer: (xml: string) => Promise<string> = signSap,
 ): Promise<Account> {
   let cookies: Cookie[] = existingCookies ? [...existingCookies] : [];
   let storeFront = "";
@@ -55,9 +57,16 @@ export async function authenticate(
 
       const plistBody = buildPlist(body);
 
+      // Apple 登录现在要求 SAP 签名（X-Apple-ActionSignature），
+      // 签名必须覆盖实际提交的 XML 原始字节
+      const sapSignature = await signer(plistBody);
+
       const headers: Record<string, string> = {
         "Content-Type": "application/x-apple-plist",
       };
+      if (sapSignature) {
+        headers["X-Apple-ActionSignature"] = sapSignature;
+      }
 
       const response = await appleRequest({
         method: "POST",

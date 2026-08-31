@@ -8,6 +8,11 @@ vi.mock("../../src/apple/request", () => ({
   appleRequest: vi.fn(),
 }));
 
+// SAP 签名引擎仅浏览器可用，测试中跳过
+vi.mock("../../src/apple/sapSigner", () => ({
+  signSap: vi.fn(async () => ""),
+}));
+
 vi.mock("../../src/apple/bag", () => ({
   fetchBag: vi.fn(),
   defaultAuthURL:
